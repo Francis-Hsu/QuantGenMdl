@@ -143,7 +143,7 @@ if not os.path.exists(data_path):
 for t in range(19, 14, -1):
     params_tot = np.zeros((20, 2*(n+na)*L))
     for tt in range(t+1, T):
-        params_tot[tt] = np.load('data/QDDPM/noise/n2/record_%s/QDDPMcircleYparams_n%dna%dT%dL%d_t%d_%s.npy'
+        params_tot[tt] = np.load('data/QDDPM/noise/n2/record_%s/QDDPMcorrNoiseparams_n%dna%dT%dL%d_t%d_%s.npy'
                                  % (method, n, na, T, L, tt, method))
 
     t1 = time.time()
