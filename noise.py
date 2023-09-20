@@ -115,7 +115,7 @@ T = 20
 L = 6
 Ndata = 500
 epochs = 2000
-repeats = 10
+repeats = 5
 method = 'nat'
 
 diffModel = DiffusionModel(n, T, Ndata)
