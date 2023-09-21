@@ -205,10 +205,11 @@ def naturalDistance(Set1, Set2):
         r1/r2: mean of intra-distance within Set1/Set2
     '''
     # a natural measure on the distance between two sets, according to trace distance
-    r11 = 1. - torch.mean(torch.abs(contract('mi,ni->mn', Set1.conj(), Set1))**2)
-    r22 = 1. - torch.mean(torch.abs(contract('mi,ni->mn', Set2.conj(), Set2))**2)
-    r12 = 1. - torch.mean(torch.abs(contract('mi,ni->mn', Set1.conj(), Set2))**2)
-    return 2*r12 - r11 - r22
+    r11 = 1. - tf.reduce_mean(tf.abs(contract('mi,ni->mn', tf.math.conj(Set1), Set1)) ** 2)
+    r22 = 1. - tf.reduce_mean(tf.abs(contract('mi,ni->mn', tf.math.conj(Set2), Set2)) ** 2)
+    r12 = 1. - tf.reduce_mean(tf.abs(contract('mi,ni->mn', tf.math.conj(Set1), Set2)) ** 2)
+    
+    return 2 * r12 - r11 - r22
 
 
 def diffusionDistance(Set1, Set2, band_width=0.05, q=None):
@@ -218,8 +219,8 @@ def diffusionDistance(Set1, Set2, band_width=0.05, q=None):
         q: number of diffusion steps 
     '''
     # calculate distance matrix
-    Set = torch.vstack((Set1, Set2))
-    S = torch.abs(contract('mi, ni->mn', Set.conj(), Set))**2
+    Set = tf.concat([Set1, Set2], 0)
+    S = tf.abs(contract('mi, ni->mn', tf.math.conj(Set), Set)) ** 2.0
     Kn = 1. - S
 
     Ndata1 = Set1.shape[0]
@@ -228,15 +229,20 @@ def diffusionDistance(Set1, Set2, band_width=0.05, q=None):
 
     # compute the kernel matrix
     Kn /= 2.0 * band_width ** 2.0
-    Kn = torch.exp(-Kn)
+    Kn = tf.exp(-Kn)
 
-    Dinv = Kn.sum(axis=1)  # diagonal of inverse degree
+    Dinv = tf.reduce_sum(Kn, axis=1) # diagonal of inverse degree
     Dinv = 1.0 / Dinv
-    P = (Dinv * Kn.T).T
-    P = matrix_power(P, q)
-    A = P * Dinv  # affinity matrix
-    return torch.mean(A[:Ndata1, :Ndata1]) + torch.mean(A[Ndata1:, Ndata1:])\
-            - 2*torch.mean(A[:Ndata1, Ndata1:])
+    P = tf.transpose(Dinv * tf.transpose(Kn))
+
+    # matrix power by eigendecomposition
+    D, Q = tf.linalg.eig(P)
+    P = Q @ tf.transpose(tf.pow(D, q) * tf.transpose(tf.linalg.inv(Q)))
+    P = tf.math.real(P)
+
+    A = P * Dinv # affinity matrix
+
+    return tf.reduce_mean(A[:Ndata1, :Ndata1]) + tf.reduce_mean(A[Ndata1:, Ndata1:]) - 2 * tf.reduce_mean(A[:Ndata1, Ndata1:])
 
 
 def WassDistance(Set1, Set2):
@@ -244,9 +250,11 @@ def WassDistance(Set1, Set2):
         calculate the Wasserstein distance between two sets of quantum states
         the cost matrix is the inter trace distance between sets S1, S2
     '''
-    D = 1. - torch.abs(Set1.conj() @ Set2.T)**2.
-    emt = torch.empty(0)
+    D = 1. - tf.abs(tf.math.conj(Set1) @ tf.transpose(Set2)) ** 2.
+    n = D.shape[0]
+    emt = tf.ones(n) / n
     Wass_dis = ot.emd2(emt, emt, M=D)
+
     return Wass_dis
 
 
@@ -257,12 +265,14 @@ def sinkhornDistance(Set1, Set2, reg=0.005, log=False):
         reg: the regularization coefficient
         log: whether to use the log-solver
     '''
-    D = 1. - torch.abs(Set1.conj() @  Set2.T)**2.
-    emt = torch.empty(0)
+    D = 1. - tf.abs(tf.math.conj(Set1) @ tf.transpose(Set2)) ** 2.
+    n = D.shape[0]
+    emt = tf.ones(n) / n
     if log == True:
-        sh_dis = ot.sinkhorn2(emt, emt, M=D, reg=reg, method='sinkhorn_log')
+        sh_dis = ot.sinkhorn2(emt, emt, M=D, reg=reg, method='sinkhorn_stabilized')
     else:
         sh_dis = ot.sinkhorn2(emt, emt, M=D, reg=reg)
+        
     return sh_dis
 
 
