@@ -140,7 +140,7 @@ data_path = "data/QDDPM/circle/n%d/record_%s/" % (n, method)
 if not os.path.exists(data_path):
     os.makedirs(data_path)
 
-for t in range(19, 14, -1):
+for t in range(14, -1, -1):
     params_tot = np.zeros((20, 2*(n+na)*L))
     for tt in range(t+1, T):
         params_tot[tt] = np.load('data/QDDPM/noise/n2/record_%s/QDDPMcorrNoiseparams_n%dna%dT%dL%d_t%d_%s.npy'
