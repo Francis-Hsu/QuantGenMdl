@@ -77,12 +77,10 @@ class DiffusionModel(nn.Module):
         inputs: the input quantum data set
         diff_hs: the hyper-parameter to control the amplitude of quantum circuit angles
         '''
-        diff_hs = tf.repeat(diff_hs, 3 * self.n)
-
         # set single-qubit rotation angles
         tf.random.set_seed(seed)
         phis = tf.random.uniform((self.Ndata, 3*self.n*t)) * np.pi/4. - np.pi/8.
-        phis *= diff_hs
+        phis *= tf.repeat(diff_hs, 3 * self.n)
 
         if self.n > 1:
             # set homogenous RZZ gate angles
