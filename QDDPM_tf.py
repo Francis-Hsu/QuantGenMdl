@@ -7,6 +7,7 @@ import scipy as sp
 from scipy.stats import unitary_group
 
 import tensorflow as tf
+import tensorflow_probability as tfp
 from tensorflow.python.ops.numpy_ops import np_config
 
 import tensorcircuit as tc
@@ -20,7 +21,75 @@ from opt_einsum import contract
 K = tc.set_backend('tensorflow')
 tc.set_dtype('complex64')
 
-class DiffusionModel(nn.Module):
+class OneQubitDiffusionModel(nn.Module):
+    def __init__(self, T, Ndata):
+        '''
+        the diffusion quantum circuit model to scramble arbitrary set of states to Haar random states
+        Args:
+        n: number of qubits
+        T: number of diffusion steps
+        Ndata: number of samples in the dataset
+        '''
+        super().__init__()
+        self.t = 0
+        self.T = T
+        self.Ndata = Ndata
+    
+    def HaarSampleGeneration(self, Ndata, seed):
+        '''
+        generate random haar states,
+        used as inputs in the t=T step for backward denoise
+        Args:
+        Ndata: number of samples in dataset
+        '''
+        np.random.seed(seed)
+        states_T = unitary_group.rvs(dim=2, size=Ndata)[:,:,0]
+
+        return tf.convert_to_tensor(states_T)
+    
+    def scrambleCircuit_t(self, input, phis):
+        '''
+        obtain the state through diffusion step t
+        Args:
+        t: diffusion step
+        input: the input quantum state
+        phis: the single-qubit rotation angles in diffusion circuit
+        gs: the angle of RZZ gates in diffusion circuit when n>=2
+        '''
+        # input, phis = params
+        c = tc.Circuit(1, inputs=input)
+
+        for s in range(self.t):
+            # single qubit rotations
+            c.rz(0, theta=phis[3 * s])
+            c.ry(0, theta=phis[3 * s + 1])
+            c.rz(0, theta=phis[3 * s + 2])
+
+        return c.state()
+    
+    def set_diffusionData_t(self, t, inputs, diff_hs, seed):
+        '''
+        obtain the quantum data set for 1 qubit through diffusion step t
+        Args:
+        t: diffusion step
+        inputs: the input quantum data set
+        diff_hs: the hyper-parameter to control the amplitude of quantum circuit angles
+        '''
+        self.t = t
+        diff_hs = tf.repeat(diff_hs, 3)
+
+        # set single-qubit rotation angles
+        tf.random.set_seed(seed)
+        phis = tf.random.uniform((self.Ndata, 3 * t)) * np.pi / 4. - np.pi / 8.
+        phis *= diff_hs
+
+        # states = tf.vectorized_map(partial(self.scrambleCircuit_t, t=t), (inputs, phis))
+        states = K.vmap(self.scrambleCircuit_t, vectorized_argnums=(0, 1))(inputs, phis)
+
+        return states
+    
+    
+class MultiQubitDiffusionModel(nn.Module):
     def __init__(self, n, T, Ndata):
         '''
         the diffusion quantum circuit model to scramble arbitrary set of states to Haar random states
@@ -42,11 +111,11 @@ class DiffusionModel(nn.Module):
         Ndata: number of samples in dataset
         '''
         np.random.seed(seed)
-        states_T = unitary_group.rvs(dim=2**self.n, size=Ndata)[:,:,0]
+        states_T = unitary_group.rvs(dim=2 ** self.n, size=Ndata)[:,:,0]
 
         return tf.convert_to_tensor(states_T)
     
-    def scrambleCircuit_t(self, t, input, phis, gs=None):
+    def scrambleCircuit_t(self, params, t):
         '''
         obtain the state through diffusion step t
         Args:
@@ -55,23 +124,24 @@ class DiffusionModel(nn.Module):
         phis: the single-qubit rotation angles in diffusion circuit
         gs: the angle of RZZ gates in diffusion circuit when n>=2
         '''
+        input, phis, gs = params
         c = tc.Circuit(self.n, inputs=input)
-        for tt in range(t):
+        for s in range(t):
             # single qubit rotations
             for i in range(self.n):
-                c.rz(i, theta=phis[3 * self.n * tt + i])
-                c.ry(i, theta=phis[3 * self.n * tt + self.n + i])
-                c.rz(i, theta=phis[3 * self.n * tt + 2*self.n + i])
+                c.rz(i, theta=phis[3 * self.n * s + i])
+                c.ry(i, theta=phis[3 * self.n * s + self.n + i])
+                c.rz(i, theta=phis[3 * self.n * s + 2*self.n + i])
+
             # homogenous RZZ on every pair of qubits (n>=2)
-            if self.n >= 2:
-                for i, j in combinations(range(self.n), 2):
-                    c.rzz(i, j, theta=gs[tt] / (2 * self.n ** 0.5))
+            for i, j in combinations(range(self.n), 2):
+                c.rzz(i, j, theta=gs[s] / (2 * self.n ** 0.5))
 
         return c.state()
-    
-    def set_diffusionData_t(self, t, inputs, diff_hs, seed):
+        
+    def set_diffusionDataMulti_t(self, t, inputs, diff_hs, seed):
         '''
-        obtain the quantum data set through diffusion step t
+        obtain the quantum data set for multiple qubit through diffusion step t
         Args:
         t: diffusion step
         inputs: the input quantum data set
@@ -79,23 +149,19 @@ class DiffusionModel(nn.Module):
         '''
         # set single-qubit rotation angles
         tf.random.set_seed(seed)
-        phis = tf.random.uniform((self.Ndata, 3*self.n*t)) * np.pi/4. - np.pi/8.
+        phis = tf.random.uniform((self.Ndata, 3 * self.n * t)) * np.pi / 4. - np.pi / 8.
         phis *= tf.repeat(diff_hs, 3 * self.n)
 
-        if self.n > 1:
-            # set homogenous RZZ gate angles
-            gs = tf.random.uniform((self.Ndata, t)) * 0.2 + 0.4
-            gs *= diff_hs
+        # set homogenous RZZ gate angles
+        gs = tf.random.uniform((self.Ndata, t)) * 0.2 + 0.4
+        gs *= diff_hs
         
-        if self.n > 1:
-            states = tf.vectorized_map(lambda x: self.scrambleCircuit_t(t, x[0], x[1], x[2]), (inputs, phis, gs))
-        else:
-            states = tf.vectorized_map(lambda x: self.scrambleCircuit_t(t, x[0], x[1]), (inputs, phis))
+        states = tf.vectorized_map(partial(self.scrambleCircuit_t, t=t), (inputs, phis, gs))
 
         return states
 
 
-def backCircuit(input, params, n_tot, L):
+def backCircuit(input, n_tot, L):
     '''
     the backward denoise parameteric quantum circuits,
     designed following the hardware-efficient ansatz
@@ -107,14 +173,18 @@ def backCircuit(input, params, n_tot, L):
     L: layers of circuit
     '''
     c = tc.Circuit(n_tot, inputs=input)
-    for l in range(L):
+
+    for _ in range(L):
         for i in range(n_tot):
-            c.rx(i, theta=params[2*n_tot*l+i])
-            c.ry(i, theta=params[2*n_tot*l+n_tot+i])
-        for i in range(n_tot//2):
-            c.cz(2*i, 2*i+1)
-        for i in range((n_tot-1)//2):
-            c.cz(2*i+1, 2*i+2)
+            c.rx(i, theta=0.3)
+            c.ry(i, theta=0.1)
+
+        for i in range(n_tot // 2):
+            c.cz(2 * i, 2 * i + 1)
+
+        for i in range((n_tot-1) // 2):
+            c.cz(2 * i + 1, 2 * i + 2)
+
     return c.state()
 
 
@@ -148,12 +218,14 @@ class QDDPM_cpu(nn.Module):
         Args:
         inputs: states to be measured, first na qubit is ancilla
         '''
-        m_probs = (torch.abs(inputs.reshape(inputs.shape[0], 2**self.na, 2**self.n))**2).sum(dim=2)
-        m_res = torch.multinomial(m_probs, num_samples=1).squeeze() # measurment results
-        indices = 2**self.n * m_res.view(-1, 1) + torch.arange(2**self.n)
-        post_state = torch.gather(inputs, 1, indices)
-        norms = torch.sqrt(torch.sum(torch.abs(post_state)**2, axis=1)).unsqueeze(dim=1)
-        return 1./norms * post_state
+        n_batch = inputs.shape[0]
+        m_probs = tf.abs(tf.reshape(inputs, [n_batch, 2 ** self.na, 2 ** self.n])) ** 2.0
+        m_probs = tf.reduce_sum(m_probs, axis=2)
+        m_res = tfp.distributions.Categorical(probs=m_probs).sample(1)
+        indices = 2 ** self.n * tf.reshape(m_res, [-1, 1]) + tf.range(2 ** self.n)
+        post_state = tf.gather(inputs, indices, batch_dims=1)
+        
+        return tf.linalg.normalize(post_state, axis=1)
 
     def backwardOutput_t(self, inputs, params):
         '''
@@ -165,6 +237,7 @@ class QDDPM_cpu(nn.Module):
         output_full = self.backCircuit_vmap(inputs, params) 
         # perform measurement
         output_t = self.randomMeasure(output_full)
+
         return output_t
     
     def prepareInput_t(self, inputs_T, params_tot, t, Ndata):
@@ -180,6 +253,7 @@ class QDDPM_cpu(nn.Module):
         with torch.no_grad():
             for tt in range(self.T-1, t, -1):
                 self.input_tplus1[:,:2**self.n] = self.backwardOutput_t(self.input_tplus1, params_tot[tt])
+
         return self.input_tplus1
     
     def backDataGeneration(self, inputs_T, params_tot, Ndata):
@@ -192,6 +266,7 @@ class QDDPM_cpu(nn.Module):
         with torch.no_grad():
             for tt in range(self.T-1, -1, -1):
                 states[tt, :, :2**self.n] = self.backwardOutput_t(states[tt+1], params_tot[tt])
+
         return states
 
 
@@ -255,8 +330,7 @@ def WassDistance(Set1, Set2):
 
     return Wass_dis
 
-
-def sinkhornDistance(Set1, Set2, reg=0.005, log=False):
+def sinkhornDistance(Set1, Set2, reg=0.005, eps=1e-4, log=False):
     '''
         calculate the Sinkhorn distance between two sets of quantum states
         the cost matrix is the inter trace distance between sets S1, S2
@@ -267,13 +341,11 @@ def sinkhornDistance(Set1, Set2, reg=0.005, log=False):
     n = D.shape[0]
     emt = tf.ones(n) / n
     if log == True:
-        sh_dis = ot.sinkhorn2(emt, emt, M=D, reg=reg, method='sinkhorn_stabilized')
+        sh_dis = ot.sinkhorn2(emt, emt, M=D, reg=reg, stopThr=eps, method='sinkhorn_stabilized')
     else:
-        sh_dis = ot.sinkhorn2(emt, emt, M=D, reg=reg)
+        sh_dis = ot.sinkhorn2(emt, emt, M=D, reg=reg, stopThr=eps)
         
     return sh_dis
-
-
 
 
 class QDDPM(nn.Module):
