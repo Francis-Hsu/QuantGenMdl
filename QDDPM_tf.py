@@ -445,3 +445,149 @@ class QDDPM(nn.Module):
                 self.qclayer.q_weights[0] = params_tot[tt] # set quantum-circuit parameters
                 self.input_tplus1[:,:2**self.n] = self.backwardOutput_t(self.input_tplus1, mseq=False)
         return self.input_tplus1
+
+
+class QDDPM_cpu():
+    def __init__(self, n, na, T, L):
+        '''
+        the QDDPM model: backward process only work on cpu
+        Args:
+        n: number of data qubits
+        na: number of ancilla qubits
+        T: number of diffusion steps
+        L: layers of circuit in each backward step
+        '''
+        super().__init__()
+        self.n = n
+        self.na = na
+        self.n_tot = n + na
+        self.T = T
+        self.L = L
+        # embed the circuit to a vectorized pytorch neural network layer
+        self.backCircuit_vmap = K.vmap(partial(backCircuit, n_tot=self.n_tot, L=L), vectorized_argnums=0)
+
+    def set_diffusionSet(self, states_diff):
+        self.states_diff = tf.cast(tf.convert_to_tensor(states_diff), dtype=tf.complex64)
+
+    def randomMeasure(self, inputs):
+        '''
+        Given the inputs on both data & ancilla qubits before measurmenets,
+        calculate the post-measurement state.
+        The measurement and state output are calculated in parallel for data samples
+        Args:
+        inputs: states to be measured, first na qubit is ancilla
+        '''
+        n_batch = inputs.shape[0]
+        m_probs = tf.abs(tf.reshape(inputs, [n_batch, 2 ** self.na, 2 ** self.n])) ** 2.0
+        m_probs = tf.reduce_sum(m_probs, axis=2)
+        m_res = tfp.distributions.Categorical(probs=m_probs).sample(1)
+        indices = 2 ** self.n * tf.reshape(m_res, [-1, 1]) + tf.range(2 ** self.n)
+        post_state = tf.gather(inputs, indices, batch_dims=1)
+        
+        return tf.linalg.normalize(post_state, axis=1)[0]
+
+    def backwardOutput_t(self, inputs, params):
+        '''
+        Backward denoise process at step t
+        Args:
+        inputs: the input data set at step t
+        '''
+        # outputs through quantum circuits before measurement
+        output_full = self.backCircuit_vmap(inputs, params) 
+        # perform measurement
+        output_t = self.randomMeasure(output_full)
+
+        return output_t
+    
+    def prepareInput_t(self, inputs_T, params_tot, t, Ndata):
+        '''
+        prepare the input samples for step t
+        Args:
+        inputs_T: the input state at the beginning of backward
+        params_tot: all circuit parameters till step t+1
+        '''
+        self.input_tplus1 = tf.concat([inputs_T, tf.zeros(shape=(Ndata, 2**self.n_tot-2**self.n), 
+                                                          dtype=tf.complex64)], axis=1)
+        params_tot = tf.constant(params_tot, dtype=tf.float32)
+        for tt in range(self.T-1, t, -1):
+            output = self.backwardOutput_t(self.input_tplus1, params_tot[tt])
+            self.input_tplus1 = tf.concat([output, tf.zeros(shape=(Ndata, 2**self.n_tot-2**self.n), 
+                                                            dtype=tf.complex64)], axis=1)
+
+        return self.input_tplus1
+    
+    def backDataGeneration(self, inputs_T, params_tot, Ndata):
+        '''
+        generate the dataset in backward denoise process with training data set
+        '''
+        states = [inputs_T]
+        input_tplus1 = tf.concat([inputs_T, tf.zeros(shape=(Ndata, 2**self.n_tot-2**self.n), 
+                                                          dtype=tf.complex64)], axis=1)
+        params_tot = tf.cast(tf.convert_to_tensor(params_tot), dtype=tf.float32)
+        for tt in range(self.T-1, -1, -1):
+            output = self.backwardOutput_t(input_tplus1, params_tot[tt])
+            input_tplus1 = tf.concat([output, tf.zeros(shape=(Ndata, 2**self.n_tot-2**self.n), 
+                                                            dtype=tf.complex64)], axis=1)
+            states.append(output)
+        states = tf.stack(states)[::-1]
+        return states
+
+
+def Training_t(model, t, inputs_T, params_tot, Ndata, epochs, dis_measure='nat', dis_params={}):
+    '''
+    the batch trianing for the backward PQC at step t
+    Args:
+    model: the QDDPM
+    t: diffusion step
+    params_tot: collection of PQC parameters for steps > t 
+    Ndata: number of samples in training data set
+    batchsize: number of samples in one batch
+    epochs: number of iterations
+    dis_measure: the distance measure to compare two distributions of quantum states
+    dis_params: potential hyper-parameters for distance measure
+    '''
+    
+    input_tplus1 = model.prepareInput_t(inputs_T, params_tot, t, Ndata) # prepare input
+    states_diff = model.states_diff
+    loss_hist = [] # record of training history
+    f_hist = [] # record of std of bloch-y cooredinates
+
+    # np.random.seed()
+    params_t = tf.Variable(tf.random.normal([2 * model.n_tot * model.L]))
+    # set optimizer and learning rate decay
+    optimizer = tf.keras.optimizers.SGD(learning_rate=0.01, momentum=0.9)
+
+    def scheduler(epoch, lr):
+        decay_rate = 0.8
+        decay_step = 200
+        if epoch % decay_step == 0 and epoch:
+            return lr * pow(decay_rate, np.floor(epoch / decay_step))
+        
+        return lr
+
+    for step in range(epochs):
+        indices = np.random.choice(states_diff.shape[1], size=Ndata, replace=False)
+        true_data = states_diff[t, indices]
+        
+        with tf.GradientTape() as tape:
+            output_t = model.backwardOutput_t(input_tplus1, params_t)
+            if dis_measure == 'nat':
+                # natural distance
+                loss = naturalDistance(output_t, true_data)
+            elif dis_measure == 'wd':
+                # Wassastein distance
+                loss = WassDistance(output_t, true_data)
+
+        grads = tape.gradient(loss, [params_t])
+        optimizer.apply_gradients(zip(grads, [params_t]))
+
+        loss_hist.append(tf.stop_gradient(loss)) # record the current loss
+        f_hist.append(tf.math.reduce_mean(tf.abs(tf.stop_gradient(output_t)[:,2])**2))
+
+        if (step + 1) % 10 == 0 or not step:
+            print(step + 1, loss)
+
+        lr = scheduler(step, optimizer.learning_rate)
+        optimizer.learning_rate.assign(lr)
+
+    return tf.stop_gradient(params_t), tf.squeeze(tf.stack(loss_hist)), tf.squeeze(tf.stack(f_hist))
