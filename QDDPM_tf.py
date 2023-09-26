@@ -7,6 +7,7 @@ import scipy as sp
 from scipy.stats import unitary_group
 
 import tensorflow as tf
+import tensorflow.math as tfm
 import tensorflow_probability as tfp
 from tensorflow.python.ops.numpy_ops import np_config
 
@@ -270,184 +271,7 @@ class QDDPM_cpu(nn.Module):
         return states
 
 
-def naturalDistance(Set1, Set2):
-    '''
-        a natural measure on the distance between two sets of quantum states
-        definition: 2*d - r1-r2
-        d: mean of inter-distance between Set1 and Set2
-        r1/r2: mean of intra-distance within Set1/Set2
-    '''
-    # a natural measure on the distance between two sets, according to trace distance
-    r11 = 1. - tf.reduce_mean(tf.abs(contract('mi,ni->mn', tf.math.conj(Set1), Set1))**2)
-    r22 = 1. - tf.reduce_mean(tf.abs(contract('mi,ni->mn', tf.math.conj(Set2), Set2))**2)
-    r12 = 1. - tf.reduce_mean(tf.abs(contract('mi,ni->mn', tf.math.conj(Set1), Set2))**2)
-    return 2 * r12 - r11 - r22
-
-
-def WassDistance(Set1, Set2):
-    '''
-        calculate the Wasserstein distance between two sets of quantum states
-        the cost matrix is the inter trace distance between sets S1, S2
-    '''
-    D = 1. - tf.abs(tf.math.conj(Set1) @ tf.transpose(Set2))**2.
-    emt = tf.constant([], dtype=tf.float32)
-    Wass_dis = ot.emd2(emt, emt, M=D)
-    return Wass_dis
-
-def sinkhornDistance(Set1, Set2, reg=0.005, eps=1e-4, log=False):
-    '''
-        calculate the Sinkhorn distance between two sets of quantum states
-        the cost matrix is the inter trace distance between sets S1, S2
-        reg: the regularization coefficient
-        log: whether to use the log-solver
-    '''
-    D = 1. - tf.abs(tf.math.conj(Set1) @ tf.transpose(Set2)) ** 2.
-    emt = tf.constant([], dtype=tf.float32)
-    if log == True:
-        sh_dis = ot.sinkhorn2(emt, emt, M=D, reg=reg, stopThr=eps, method='sinkhorn_stabilized')
-    else:
-        sh_dis = ot.sinkhorn2(emt, emt, M=D, reg=reg, stopThr=eps)
-        
-    return sh_dis
-
-def diffusionDistance(Set1, Set2, band_width=0.05, q=None):
-    '''
-        diffusion distance to measure the distance between two sets of quantum states
-        bandwidth: band width of the RBF kernel
-        q: number of diffusion steps 
-    '''
-    # calculate distance matrix
-    Set = tf.concat([Set1, Set2], 0)
-    S = tf.abs(contract('mi, ni->mn', tf.math.conj(Set), Set)) ** 2.0
-    Kn = 1. - S
-
-    Ndata1 = Set1.shape[0]
-    if q is None:
-        q = 2 * int(S.shape[0] ** 1.1)
-
-    # compute the kernel matrix
-    Kn /= 2.0 * band_width ** 2.0
-    Kn = tf.exp(-Kn)
-
-    Dinv = tf.reduce_sum(Kn, axis=1) # diagonal of inverse degree
-    Dinv = 1.0 / Dinv
-    P = tf.transpose(Dinv * tf.transpose(Kn))
-
-    # matrix power by eigendecomposition
-    D, Q = tf.linalg.eig(P)
-    P = Q @ tf.transpose(tf.pow(D, q) * tf.transpose(tf.linalg.inv(Q)))
-    P = tf.math.real(P)
-
-    A = P * Dinv # affinity matrix
-
-    return tf.reduce_mean(A[:Ndata1, :Ndata1]) + tf.reduce_mean(A[Ndata1:, Ndata1:]) - 2 * tf.reduce_mean(A[:Ndata1, Ndata1:])
-
-
-class QDDPM(nn.Module):
-    def __init__(self, n, na, T, L):
-        super().__init__()
-        '''
-        the QDDPM model: backward process
-        Args:
-        n: number of data qubits
-        na: number of ancilla qubits
-        T: number of diffusion steps
-        L: layers of circuit in each backward step
-        '''
-        self.n = n
-        self.na = na
-        self.n_tot = n + na
-        self.T = T
-        self.L = L
-        # embed the circuit to a vectorized pytorch neural network layer
-        self.qclayer = tc.TorchLayer(partial(backCircuit, n_tot=self.n_tot, L=self.L), weights_shape=[2*self.n_tot*self.L],
-                                     use_vmap=True, vectorized_argnums=0)
-
-    def set_diffusionSet(self, states_diff):
-        self.states_diff = torch.from_numpy(states_diff).cfloat()
-
-    def randomSampleGeneration(self, Ndata):
-        '''
-        generate random haar states,
-        used as inputs in the t=T step for backward denoise
-        Args:
-        Ndata: number of samples in dataset
-        '''
-        np.random.seed(22)
-        states_T = unitary_group.rvs(dim=2**self.n, size=Ndata)[:,:,0]
-        return states_T
-
-    def randomMeasure(self, input):
-        '''
-        Perform random meausurement on ancilla qubits in computational basis,
-        return the output post-measuremenet state on data qubits.
-        Currently only work on cpu
-        '''
-        q_idx = list(range(self.n_tot))
-        c = tc.Circuit(self.n_tot, inputs=input)
-        # the measurement result of ancillas
-        zs, _ = c.measure_reference(*q_idx[:self.na])
-        for i in range(self.na):
-            c.post_select(i, keep=int(zs[i]))
-            if int(zs[i]) == 1:
-                c.x(i) # re-set every ancilla to be |0>
-        post_state = c.state()[:2**self.n]
-        normal_const = K.sqrt(K.real(post_state.conj() @ post_state))
-        return post_state*(1./normal_const)
-    
-    def randomMeasureParallel(self, inputs):
-        '''
-        Given the inputs on both data & ancilla qubits before measurmenets,
-        calculate the post-measurement state.
-        The measurement and state output are calculated in parallel for data samples
-        Currently only work for one ancilla qubit.
-        Args:
-        inputs: states to be measured, first qubit is ancilla
-        '''
-        m_probs = torch.sum(torch.abs(inputs[:,:2**self.n])**2, axis=1) # the probability of measure ancilla |0>
-        m_probs = torch.vstack((m_probs, 1.-m_probs)).T
-        m_res = torch.multinomial(m_probs, num_samples=1).squeeze() # measurment results
-        post_state = torch.vstack((inputs[m_res==0, :2**self.n], \
-                                   inputs[m_res==1, 2**self.n:])) # unnormlized post-state
-        norms = torch.sqrt(torch.sum(torch.abs(post_state)**2, axis=1)).unsqueeze(dim=1)
-        post_state = 1./norms * post_state # normalize the state
-        return post_state
-
-    def backwardOutput_t(self, inputs, mseq=True):
-        '''
-        Backward denoise process at step t
-        Args:
-        inputs: the input data set at step t
-        mseq: Boolean variable, True/False for sequential/parallel implementation
-        '''
-        output_full = self.qclayer(inputs) # outputs through quantum circuits before measurement
-        # perform measurement
-        if mseq == True:
-            output_t = []
-            for i in range(inputs.shape[0]):
-                output_t.append(self.randomMeasure(output_full[i]))
-            output_t = torch.vstack(output_t)
-        else:
-            output_t = self.randomMeasureParallel(output_full)
-        return output_t
-    
-    def prepareInput_t(self, params_tot, t, Ndata):
-        '''
-        prepare the input samples for step t
-        Args:
-        params_tot: all circuit parameters till step t+1
-        '''
-        self.input_tplus1 = torch.zeros((Ndata, 2**self.n_tot)).cfloat()
-        self.input_tplus1[:,:2**self.n] = torch.from_numpy(self.randomSampleGeneration(Ndata)).cfloat()
-        params_tot = torch.from_numpy(params_tot).float()
-        with torch.no_grad():
-            for tt in range(self.T-1, t, -1):
-                self.qclayer.q_weights[0] = params_tot[tt] # set quantum-circuit parameters
-                self.input_tplus1[:,:2**self.n] = self.backwardOutput_t(self.input_tplus1, mseq=False)
-        return self.input_tplus1
-
-
-class QDDPM_cpu():
+class QDDPM():
     def __init__(self, n, na, T, L):
         '''
         the QDDPM model: backward process only work on cpu
@@ -533,61 +357,77 @@ class QDDPM_cpu():
         return states
 
 
-def Training_t(model, t, inputs_T, params_tot, Ndata, epochs, dis_measure='nat', dis_params={}):
+def naturalDistance(Set1, Set2):
     '''
-    the batch trianing for the backward PQC at step t
-    Args:
-    model: the QDDPM
-    t: diffusion step
-    params_tot: collection of PQC parameters for steps > t 
-    Ndata: number of samples in training data set
-    batchsize: number of samples in one batch
-    epochs: number of iterations
-    dis_measure: the distance measure to compare two distributions of quantum states
-    dis_params: potential hyper-parameters for distance measure
+        a natural measure on the distance between two sets of quantum states
+        definition: 2*d - r1-r2
+        d: mean of inter-distance between Set1 and Set2
+        r1/r2: mean of intra-distance within Set1/Set2
     '''
-    
-    input_tplus1 = model.prepareInput_t(inputs_T, params_tot, t, Ndata) # prepare input
-    states_diff = model.states_diff
-    loss_hist = [] # record of training history
-    f_hist = [] # record of std of bloch-y cooredinates
+    # a natural measure on the distance between two sets, according to trace distance
+    r11 = 1. - tf.reduce_mean(tf.abs(contract('mi,ni->mn', tf.math.conj(Set1), Set1))**2)
+    r22 = 1. - tf.reduce_mean(tf.abs(contract('mi,ni->mn', tf.math.conj(Set2), Set2))**2)
+    r12 = 1. - tf.reduce_mean(tf.abs(contract('mi,ni->mn', tf.math.conj(Set1), Set2))**2)
+    return 2 * r12 - r11 - r22
 
-    # np.random.seed()
-    params_t = tf.Variable(tf.random.normal([2 * model.n_tot * model.L]))
-    # set optimizer and learning rate decay
-    optimizer = tf.keras.optimizers.SGD(learning_rate=0.01, momentum=0.9)
 
-    def scheduler(epoch, lr):
-        decay_rate = 0.8
-        decay_step = 200
-        if epoch % decay_step == 0 and epoch:
-            return lr * pow(decay_rate, np.floor(epoch / decay_step))
+def WassDistance(Set1, Set2):
+    '''
+        calculate the Wasserstein distance between two sets of quantum states
+        the cost matrix is the inter trace distance between sets S1, S2
+    '''
+    D = 1. - tf.abs(tf.math.conj(Set1) @ tf.transpose(Set2))**2.
+    emt = tf.constant([], dtype=tf.float32)
+    Wass_dis = ot.emd2(emt, emt, M=D)
+    return Wass_dis
+
+def sinkhornDistance(Set1, Set2, reg=0.005, eps=1e-4, log=False):
+    '''
+        calculate the Sinkhorn distance between two sets of quantum states
+        the cost matrix is the inter trace distance between sets S1, S2
+        reg: the regularization coefficient
+        log: whether to use the log-solver
+    '''
+    D = 1. - tf.abs(tf.math.conj(Set1) @ tf.transpose(Set2)) ** 2.
+    emt = tf.constant([], dtype=tf.float32)
+    if log == True:
+        sh_dis = ot.sinkhorn2(emt, emt, M=D, reg=reg, stopThr=eps, method='sinkhorn_stabilized')
+    else:
+        sh_dis = ot.sinkhorn2(emt, emt, M=D, reg=reg, stopThr=eps)
         
-        return lr
+    return sh_dis
 
-    for step in range(epochs):
-        indices = np.random.choice(states_diff.shape[1], size=Ndata, replace=False)
-        true_data = states_diff[t, indices]
-        
-        with tf.GradientTape() as tape:
-            output_t = model.backwardOutput_t(input_tplus1, params_t)
-            if dis_measure == 'nat':
-                # natural distance
-                loss = naturalDistance(output_t, true_data)
-            elif dis_measure == 'wd':
-                # Wassastein distance
-                loss = WassDistance(output_t, true_data)
+def diffusionDistance(Set1, Set2, band_width=0.05, q=None):
+    '''
+        diffusion distance to measure the distance between two sets of quantum states
+        bandwidth: band width of the RBF kernel
+        q: number of diffusion steps 
+    '''
+    # calculate distance matrix
+    Set = tf.concat([Set1, Set2], 0)
+    S = tf.abs(contract('mi, ni->mn', tf.math.conj(Set), Set)) ** 2.0
+    Kn = 1. - S
 
-        grads = tape.gradient(loss, [params_t])
-        optimizer.apply_gradients(zip(grads, [params_t]))
+    Ndata1 = Set1.shape[0]
+    if q is None:
+        q = 2 * int(S.shape[0] ** 1.1)
 
-        loss_hist.append(tf.stop_gradient(loss)) # record the current loss
-        f_hist.append(tf.math.reduce_mean(tf.abs(tf.stop_gradient(output_t)[:,2])**2))
+    # compute the kernel matrix
+    Kn /= 2.0 * band_width ** 2.0
+    Kn = tf.exp(-Kn)
 
-        if (step + 1) % 10 == 0 or not step:
-            print(step + 1, loss)
+    Dinv = tf.reduce_sum(Kn, axis=1) # diagonal of inverse degree
+    Dinv = 1.0 / Dinv
+    P = tf.transpose(Dinv * tf.transpose(Kn))
 
-        lr = scheduler(step, optimizer.learning_rate)
-        optimizer.learning_rate.assign(lr)
+    # matrix power by eigendecomposition
+    D, Q = tf.linalg.eig(P)
+    P = Q @ tf.transpose(tf.pow(D, q) * tf.transpose(tf.linalg.inv(Q)))
+    P = tf.math.real(P)
+
+    A = P * Dinv # affinity matrix
+
+    return tf.reduce_mean(A[:Ndata1, :Ndata1]) + tf.reduce_mean(A[Ndata1:, Ndata1:]) - 2 * tf.reduce_mean(A[:Ndata1, Ndata1:])
+
 
     return tf.stop_gradient(params_t), tf.squeeze(tf.stack(loss_hist)), tf.squeeze(tf.stack(f_hist))
