@@ -90,7 +90,7 @@ class OneQubitDiffusionModel(nn.Module):
         np.random.seed(seed)
         states_T = unitary_group.rvs(dim=2, size=Ndata)[:,:,0]
 
-        return tf.convert_to_tensor(states_T)
+        return tf.cast(tf.convert_to_tensor(states_T), dtype=tf.complex64)
     
 
 class MultiQubitDiffusionModel(nn.Module):
@@ -165,7 +165,7 @@ class MultiQubitDiffusionModel(nn.Module):
         return states
 
 
-def backCircuit(input, n_tot, L):
+def backCircuit(input, params, n_tot, L):
     '''
     the backward denoise parameteric quantum circuits,
     designed following the hardware-efficient ansatz
@@ -178,10 +178,10 @@ def backCircuit(input, n_tot, L):
     '''
     c = tc.Circuit(n_tot, inputs=input)
 
-    for _ in range(L):
+    for l in range(L):
         for i in range(n_tot):
-            c.rx(i, theta=0.3)
-            c.ry(i, theta=0.1)
+            c.rx(i, theta=params[2* n_tot * l + i])
+            c.ry(i, theta=params[2* n_tot* l + n_tot + i])
 
         for i in range(n_tot // 2):
             c.cz(2 * i, 2 * i + 1)
@@ -191,7 +191,7 @@ def backCircuit(input, n_tot, L):
 
     return c.state()
 
-
+'''
 class QDDPM_cpu():
     def __init__(self, n, na, T, L):
         '''
@@ -272,6 +272,7 @@ class QDDPM_cpu():
                 states[tt, :, :2**self.n] = self.backwardOutput_t(states[tt+1], params_tot[tt])
 
         return states
+'''
 
 
 class QDDPM():
