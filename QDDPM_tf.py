@@ -22,6 +22,50 @@ from opt_einsum import contract
 K = tc.set_backend('tensorflow')
 tc.set_dtype('complex64')
 
+@tf.function
+def scrambleCircuit_t(input, phis):
+    '''
+    obtain the state through diffusion step t
+    Args:
+    t: diffusion step
+    input: the input quantum state
+    phis: the single-qubit rotation angles in diffusion circuit
+    gs: the angle of RZZ gates in diffusion circuit when n>=2
+    '''
+    # input, phis = params
+    t = phis.shape[0] // 3
+    c = tc.Circuit(1, inputs=input)
+
+    for s in range(t):
+        # single qubit rotations
+        c.rz(0, theta=phis[3 * s])
+        c.ry(0, theta=phis[3 * s + 1])
+        c.rz(0, theta=phis[3 * s + 2])
+
+    return c.state()
+
+def set_diffusionData_t(inputs, diff_hs):
+    '''
+    obtain the quantum data set for 1 qubit through diffusion step t
+    Args:
+    t: diffusion step
+    inputs: the input quantum data set
+    diff_hs: the hyper-parameter to control the amplitude of quantum circuit angles
+    '''
+    t = diff_hs.shape[0]
+    Ndata = inputs.shape[0]
+    diff_hs = tf.repeat(diff_hs, 3)
+
+    # set single-qubit rotation angles
+    tf.random.set_seed(t)
+    phis = tf.random.uniform((Ndata, 3 * t)) * np.pi / 4. - np.pi / 8.
+    phis *= diff_hs
+
+    # states = tf.vectorized_map(partial(self.scrambleCircuit_t, t=t), (inputs, phis))
+    states = K.vmap(scrambleCircuit_t, vectorized_argnums=(0, 1))(inputs, phis)
+
+    return states
+
 class OneQubitDiffusionModel(nn.Module):
     def __init__(self, T, Ndata):
         '''
@@ -48,47 +92,7 @@ class OneQubitDiffusionModel(nn.Module):
 
         return tf.convert_to_tensor(states_T)
     
-    def scrambleCircuit_t(self, input, phis):
-        '''
-        obtain the state through diffusion step t
-        Args:
-        t: diffusion step
-        input: the input quantum state
-        phis: the single-qubit rotation angles in diffusion circuit
-        gs: the angle of RZZ gates in diffusion circuit when n>=2
-        '''
-        # input, phis = params
-        c = tc.Circuit(1, inputs=input)
 
-        for s in range(self.t):
-            # single qubit rotations
-            c.rz(0, theta=phis[3 * s])
-            c.ry(0, theta=phis[3 * s + 1])
-            c.rz(0, theta=phis[3 * s + 2])
-
-        return c.state()
-    
-    def set_diffusionData_t(self, t, inputs, diff_hs, seed):
-        '''
-        obtain the quantum data set for 1 qubit through diffusion step t
-        Args:
-        t: diffusion step
-        inputs: the input quantum data set
-        diff_hs: the hyper-parameter to control the amplitude of quantum circuit angles
-        '''
-        self.t = t
-        diff_hs = tf.repeat(diff_hs, 3)
-
-        # set single-qubit rotation angles
-        tf.random.set_seed(seed)
-        phis = tf.random.uniform((self.Ndata, 3 * t)) * np.pi / 4. - np.pi / 8.
-        phis *= diff_hs
-
-        # states = tf.vectorized_map(partial(self.scrambleCircuit_t, t=t), (inputs, phis))
-        states = K.vmap(self.scrambleCircuit_t, vectorized_argnums=(0, 1))(inputs, phis)
-
-        return states
-    
     
 class MultiQubitDiffusionModel(nn.Module):
     def __init__(self, n, T, Ndata):
