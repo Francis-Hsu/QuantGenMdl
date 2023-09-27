@@ -93,7 +93,6 @@ class OneQubitDiffusionModel(nn.Module):
         return tf.convert_to_tensor(states_T)
     
 
-    
 class MultiQubitDiffusionModel(nn.Module):
     def __init__(self, n, T, Ndata):
         '''
@@ -118,7 +117,7 @@ class MultiQubitDiffusionModel(nn.Module):
         np.random.seed(seed)
         states_T = unitary_group.rvs(dim=2 ** self.n, size=Ndata)[:,:,0]
 
-        return tf.convert_to_tensor(states_T)
+        return tf.cast(tf.convert_to_tensor(states_T), dtype=tf.complex64)
     
     def scrambleCircuit_t(self, params, t):
         '''
@@ -193,86 +192,86 @@ def backCircuit(input, n_tot, L):
     return c.state()
 
 
-class QDDPM_cpu(nn.Module):
-    def __init__(self, n, na, T, L):
-        '''
-        the QDDPM model: backward process only work on cpu
-        Args:
-        n: number of data qubits
-        na: number of ancilla qubits
-        T: number of diffusion steps
-        L: layers of circuit in each backward step
-        '''
-        super().__init__()
-        self.n = n
-        self.na = na
-        self.n_tot = n + na
-        self.T = T
-        self.L = L
-        # embed the circuit to a vectorized pytorch neural network layer
-        self.backCircuit_vmap = K.jit( K.vmap(partial(backCircuit, n_tot=self.n_tot, L=L), vectorized_argnums=0) )
+# class QDDPM_cpu():
+#     def __init__(self, n, na, T, L):
+#         '''
+#         the QDDPM model: backward process only work on cpu
+#         Args:
+#         n: number of data qubits
+#         na: number of ancilla qubits
+#         T: number of diffusion steps
+#         L: layers of circuit in each backward step
+#         '''
+#         super().__init__()
+#         self.n = n
+#         self.na = na
+#         self.n_tot = n + na
+#         self.T = T
+#         self.L = L
+#         # embed the circuit to a vectorized pytorch neural network layer
+#         self.backCircuit_vmap = K.jit(K.vmap(partial(backCircuit, n_tot=self.n_tot, L=L), vectorized_argnums=0))
 
-    def set_diffusionSet(self, states_diff):
-        self.states_diff = torch.from_numpy(states_diff).cfloat()
+#     def set_diffusionSet(self, states_diff):
+#         self.states_diff = torch.from_numpy(states_diff).cfloat()
 
-    def randomMeasure(self, inputs):
-        '''
-        Given the inputs on both data & ancilla qubits before measurmenets,
-        calculate the post-measurement state.
-        The measurement and state output are calculated in parallel for data samples
-        Args:
-        inputs: states to be measured, first na qubit is ancilla
-        '''
-        n_batch = inputs.shape[0]
-        m_probs = tf.abs(tf.reshape(inputs, [n_batch, 2 ** self.na, 2 ** self.n])) ** 2.0
-        m_probs = tf.reduce_sum(m_probs, axis=2)
-        m_res = tfp.distributions.Categorical(probs=m_probs).sample(1)
-        indices = 2 ** self.n * tf.reshape(m_res, [-1, 1]) + tf.range(2 ** self.n)
-        post_state = tf.gather(inputs, indices, batch_dims=1)
+#     def randomMeasure(self, inputs):
+#         '''
+#         Given the inputs on both data & ancilla qubits before measurmenets,
+#         calculate the post-measurement state.
+#         The measurement and state output are calculated in parallel for data samples
+#         Args:
+#         inputs: states to be measured, first na qubit is ancilla
+#         '''
+#         n_batch = inputs.shape[0]
+#         m_probs = tf.abs(tf.reshape(inputs, [n_batch, 2 ** self.na, 2 ** self.n])) ** 2.0
+#         m_probs = tf.reduce_sum(m_probs, axis=2)
+#         m_res = tfp.distributions.Categorical(probs=m_probs).sample(1)
+#         indices = 2 ** self.n * tf.reshape(m_res, [-1, 1]) + tf.range(2 ** self.n)
+#         post_state = tf.gather(inputs, indices, batch_dims=1)
         
-        return tf.linalg.normalize(post_state, axis=1)
+#         return tf.linalg.normalize(post_state, axis=1)
 
-    def backwardOutput_t(self, inputs, params):
-        '''
-        Backward denoise process at step t
-        Args:
-        inputs: the input data set at step t
-        '''
-        # outputs through quantum circuits before measurement
-        output_full = self.backCircuit_vmap(inputs, params) 
-        # perform measurement
-        output_t = self.randomMeasure(output_full)
+#     def backwardOutput_t(self, inputs, params):
+#         '''
+#         Backward denoise process at step t
+#         Args:
+#         inputs: the input data set at step t
+#         '''
+#         # outputs through quantum circuits before measurement
+#         output_full = self.backCircuit_vmap(inputs, params) 
+#         # perform measurement
+#         output_t = self.randomMeasure(output_full)
 
-        return output_t
+#         return output_t
     
-    def prepareInput_t(self, inputs_T, params_tot, t, Ndata):
-        '''
-        prepare the input samples for step t
-        Args:
-        inputs_T: the input state at the beginning of backward
-        params_tot: all circuit parameters till step t+1
-        '''
-        self.input_tplus1 = torch.zeros((Ndata, 2**self.n_tot)).cfloat()
-        self.input_tplus1[:,:2**self.n] = inputs_T
-        params_tot = torch.from_numpy(params_tot).float()
-        with torch.no_grad():
-            for tt in range(self.T-1, t, -1):
-                self.input_tplus1[:,:2**self.n] = self.backwardOutput_t(self.input_tplus1, params_tot[tt])
+#     def prepareInput_t(self, inputs_T, params_tot, t, Ndata):
+#         '''
+#         prepare the input samples for step t
+#         Args:
+#         inputs_T: the input state at the beginning of backward
+#         params_tot: all circuit parameters till step t+1
+#         '''
+#         self.input_tplus1 = torch.zeros((Ndata, 2**self.n_tot)).cfloat()
+#         self.input_tplus1[:,:2**self.n] = inputs_T
+#         params_tot = torch.from_numpy(params_tot).float()
+#         with torch.no_grad():
+#             for tt in range(self.T-1, t, -1):
+#                 self.input_tplus1[:,:2**self.n] = self.backwardOutput_t(self.input_tplus1, params_tot[tt])
 
-        return self.input_tplus1
+#         return self.input_tplus1
     
-    def backDataGeneration(self, inputs_T, params_tot, Ndata):
-        '''
-        generate the dataset in backward denoise process with training data set
-        '''
-        states = torch.zeros((self.T+1, Ndata, 2**self.n_tot)).cfloat()
-        states[-1, :, :2**self.n] = inputs_T
-        params_tot = torch.from_numpy(params_tot).float()
-        with torch.no_grad():
-            for tt in range(self.T-1, -1, -1):
-                states[tt, :, :2**self.n] = self.backwardOutput_t(states[tt+1], params_tot[tt])
+#     def backDataGeneration(self, inputs_T, params_tot, Ndata):
+#         '''
+#         generate the dataset in backward denoise process with training data set
+#         '''
+#         states = torch.zeros((self.T+1, Ndata, 2**self.n_tot)).cfloat()
+#         states[-1, :, :2**self.n] = inputs_T
+#         params_tot = torch.from_numpy(params_tot).float()
+#         with torch.no_grad():
+#             for tt in range(self.T-1, -1, -1):
+#                 states[tt, :, :2**self.n] = self.backwardOutput_t(states[tt+1], params_tot[tt])
 
-        return states
+#         return states
 
 
 class QDDPM():
@@ -292,10 +291,10 @@ class QDDPM():
         self.T = T
         self.L = L
         # embed the circuit to a vectorized pytorch neural network layer
-        self.backCircuit_vmap = K.vmap(partial(backCircuit, n_tot=self.n_tot, L=L), vectorized_argnums=0)
+        self.backCircuit_vmap = K.jit(K.vmap(partial(backCircuit, n_tot=self.n_tot, L=L), vectorized_argnums=0))
 
     def set_diffusionSet(self, states_diff):
-        self.states_diff = tf.cast(tf.convert_to_tensor(states_diff), dtype=tf.complex64)
+        self.states_diff = tf.convert_to_tensor(states_diff)
 
     def randomMeasure(self, inputs):
         '''
@@ -334,13 +333,12 @@ class QDDPM():
         inputs_T: the input state at the beginning of backward
         params_tot: all circuit parameters till step t+1
         '''
-        self.input_tplus1 = tf.concat([inputs_T, tf.zeros(shape=(Ndata, 2**self.n_tot-2**self.n), 
-                                                          dtype=tf.complex64)], axis=1)
+        zero_tensor = tf.zeros(shape=(Ndata, 2**self.n_tot-2**self.n), dtype=tf.complex64)
+        self.input_tplus1 = tf.concat([inputs_T, zero_tensor], axis=1)
         params_tot = tf.constant(params_tot, dtype=tf.float32)
         for tt in range(self.T-1, t, -1):
             output = self.backwardOutput_t(self.input_tplus1, params_tot[tt])
-            self.input_tplus1 = tf.concat([output, tf.zeros(shape=(Ndata, 2**self.n_tot-2**self.n), 
-                                                            dtype=tf.complex64)], axis=1)
+            self.input_tplus1 = tf.concat([output, zero_tensor], axis=1)
 
         return self.input_tplus1
     
