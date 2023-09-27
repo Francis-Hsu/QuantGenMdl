@@ -206,7 +206,7 @@ class QDDPM_cpu(nn.Module):
         self.T = T
         self.L = L
         # embed the circuit to a vectorized pytorch neural network layer
-        self.backCircuit_vmap = K.vmap(partial(backCircuit, n_tot=self.n_tot, L=L), vectorized_argnums=0)
+        self.backCircuit_vmap = K.jit( K.vmap(partial(backCircuit, n_tot=self.n_tot, L=L), vectorized_argnums=0) )
 
     def set_diffusionSet(self, states_diff):
         self.states_diff = torch.from_numpy(states_diff).cfloat()
