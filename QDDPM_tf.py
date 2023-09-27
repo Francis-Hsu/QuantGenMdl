@@ -23,7 +23,7 @@ K = tc.set_backend('tensorflow')
 tc.set_dtype('complex64')
 
 @tf.function
-def scrambleCircuit_t(input, phis):
+def scrambleCircuitOneQubit(input, phis):
     '''
     obtain the state through diffusion step t
     Args:
@@ -44,7 +44,7 @@ def scrambleCircuit_t(input, phis):
 
     return c.state()
 
-def set_diffusionData_t(inputs, diff_hs):
+def setDiffusionDataOneQubit(inputs, diff_hs):
     '''
     obtain the quantum data set for 1 qubit through diffusion step t
     Args:
@@ -62,7 +62,7 @@ def set_diffusionData_t(inputs, diff_hs):
     phis *= diff_hs
 
     # states = tf.vectorized_map(partial(self.scrambleCircuit_t, t=t), (inputs, phis))
-    states = K.vmap(scrambleCircuit_t, vectorized_argnums=(0, 1))(inputs, phis)
+    states = K.vmap(scrambleCircuitOneQubit, vectorized_argnums=(0, 1))(inputs, phis)
 
     return states
 
