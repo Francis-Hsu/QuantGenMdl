@@ -8,7 +8,7 @@ from scipy.stats import unitary_group
 
 import tensorflow as tf
 import tensorflow.math as tfm
-import tensorflow_probability as tfp
+# import tensorflow_probability as tfp
 from tensorflow.python.ops.numpy_ops import np_config
 
 import tensorcircuit as tc
