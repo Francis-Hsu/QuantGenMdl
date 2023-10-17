@@ -55,7 +55,20 @@ def setDiffusionDataOneQubit(inputs, diff_hs):
     states = K.vmap(scrambleCircuitOneQubit, vectorized_argnums=(0, 1))(inputs, phis)
 
     return states
-    
+
+def HaarSampleGeneration(Ndata, seed):
+    '''
+    generate random haar states,
+    used as inputs in the t=T step for backward denoise
+    Args:
+    Ndata: number of samples in dataset
+    '''
+    np.random.seed(seed)
+    states_T = unitary_group.rvs(dim=2, size=Ndata)[:,:,0]
+
+    return jnp.array(states_T)
+
+
 def backCircuit(input, params, n_tot, L):
     '''
     the backward denoise parameteric quantum circuits,
@@ -103,7 +116,7 @@ class QDDPM():
     def set_diffusionSet(self, states_diff):
         self.states_diff = tf.convert_to_tensor(states_diff)
 
-    @jax.jit
+    @partial(jax.jit, static_argnums=(0, ))
     def randomMeasure(self, inputs):
         '''
         Given the inputs on both data & ancilla qubits before measurmenets,
@@ -121,7 +134,8 @@ class QDDPM():
         post_state /= jnp.linalg.norm(post_state, axis=1)[:, jnp.newaxis]
         
         return post_state
-
+        
+    @partial(jax.jit, static_argnums=(0, ))
     def backwardOutput_t(self, inputs, params):
         '''
         Backward denoise process at step t
