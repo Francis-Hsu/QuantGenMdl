@@ -56,6 +56,15 @@ def setDiffusionDataOneQubit(inputs, diff_hs):
 
     return states
 
+def unitary(key, n, shape):
+    a, b = jax.random.normal(key, (2, *shape, n, n))
+    z = a + b * 1j
+    q, r = jnp.linalg.qr(z)
+    d = jnp.diagonal(r, 0, -2, -1)
+
+    return jax.lax.mul(q, jax.lax.expand_dims(jax.lax.div(d, abs(d).astype(d.dtype)), [-2]))
+
+
 def HaarSampleGeneration(Ndata, seed):
     '''
     generate random haar states,
@@ -63,10 +72,10 @@ def HaarSampleGeneration(Ndata, seed):
     Args:
     Ndata: number of samples in dataset
     '''
-    np.random.seed(seed)
-    states_T = unitary_group.rvs(dim=2, size=Ndata)[:,:,0]
+    key = jax.random.PRNGKey(seed)
+    states_T = unitary(key, 2, (Ndata, ))[:,:,0]
 
-    return jnp.array(states_T)
+    return states_T
 
 
 def backCircuit(input, params, n_tot, L):
@@ -114,7 +123,7 @@ class QDDPM():
         self.backCircuit_vmap = K.jit(K.vmap(partial(backCircuit, n_tot=self.n_tot, L=self.L), vectorized_argnums=0))
 
     def set_diffusionSet(self, states_diff):
-        self.states_diff = tf.convert_to_tensor(states_diff)
+        self.states_diff = states_diff
 
     @partial(jax.jit, static_argnums=(0, ))
     def randomMeasure(self, inputs):

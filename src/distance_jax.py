@@ -1,9 +1,13 @@
 import jax
 from jax import numpy as jnp
-
-from opt_einsum import contract
+from ott.geometry import pointcloud
+from ott.solvers.linear import solve
+from ott.geometry.costs import CostFn
 
 import ot
+
+from opt_einsum import contract
+from functools import partial
 
 @jax.jit
 def naturalDistance(Set1, Set2):
@@ -20,6 +24,7 @@ def naturalDistance(Set1, Set2):
     
     return 2 * r12 - r11 - r22
 
+
 def WassDistance(Set1, Set2):
     '''
         calculate the Wasserstein distance between two sets of quantum states
@@ -32,19 +37,20 @@ def WassDistance(Set1, Set2):
 
     return Wass_dis
 
-def sinkhornDistance(Set1, Set2, reg=0.005, eps=1e-4, log=False):
+@jax.tree_util.register_pytree_node_class
+class Trace(CostFn):
+    def pairwise(self, x: jnp.ndarray, y: jnp.ndarray) -> float:
+        return 1. - jnp.abs(jnp.conj(x) @ y.T) ** 2.
+
+@partial(jax.jit, static_argnums=(2, 3, 4, ))
+def sinkhornDistance(Set1, Set2, reg=0.01, threshold=0.001, lse_mode=True):
     '''
         calculate the Sinkhorn distance between two sets of quantum states
         the cost matrix is the inter trace distance between sets S1, S2
         reg: the regularization coefficient
         log: whether to use the log-solver
     '''
-    D = 1. - jnp.abs(contract('mi,ni->mn', jnp.conj(Set1), Set2, backend='jax')) ** 2.
-    u0 = jnp.ones((D.shape[0],)) / D.shape[0]
-    u1 = jnp.ones((D.shape[1],)) / D.shape[1]
-    if log == True:
-        sh_dis = ot.sinkhorn2(u0, u1, M=D, reg=reg, stopThr=eps, method='sinkhorn_stabilized')
-    else:
-        sh_dis = ot.sinkhorn2(u0, u1, M=D, reg=reg, stopThr=eps)
-        
-    return sh_dis
+    geom = pointcloud.PointCloud(Set1, Set2, cost_fn=Trace(), epsilon=reg)
+    ot = solve(geom, a=None, b=None, lse_mode=lse_mode, threshold=threshold)
+    
+    return ot.reg_ot_cost
