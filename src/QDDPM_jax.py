@@ -1,22 +1,17 @@
-from functools import partial
-
-import tensorflow as tf
-from tensorflow.python.ops.numpy_ops import np_config
-
 import jax
 from jax import numpy as jnp
 
 import tensorcircuit as tc
 
-np_config.enable_numpy_behavior()
+from functools import partial
 
 K = tc.set_backend("jax")
 tc.set_dtype('complex64')
 
-# jit or not?
+
 def scrambleCircuitOneQubit(input, phis):
     '''
-    obtain the state through diffusion step t
+    Obtain the state through diffusion step t
     Args:
     t: diffusion step
     input: the input quantum state
@@ -35,9 +30,10 @@ def scrambleCircuitOneQubit(input, phis):
 
     return c.state()
 
+
 def setDiffusionDataOneQubit(inputs, diff_hs):
     '''
-    obtain the quantum data set for 1 qubit through diffusion step t
+    Obtain the quantum data set for 1 qubit through diffusion step t
     Args:
     t: diffusion step
     inputs: the input quantum data set
@@ -49,14 +45,23 @@ def setDiffusionDataOneQubit(inputs, diff_hs):
 
     # set single-qubit rotation angles
     key = jax.random.PRNGKey(t)
-    phis = jax.random.uniform(key, shape=(Ndata, 3 * t), minval=-jnp.pi / 8., maxval=jnp.pi / 8.)
+    phis = jax.random.uniform(key, shape=(
+        Ndata, 3 * t), minval=-jnp.pi / 8., maxval=jnp.pi / 8.)
     phis *= diff_hs
 
-    states = K.vmap(scrambleCircuitOneQubit, vectorized_argnums=(0, 1))(inputs, phis)
+    states = K.vmap(scrambleCircuitOneQubit,
+                    vectorized_argnums=(0, 1))(inputs, phis)
 
     return states
 
-def unitary(key, n, shape):
+
+def unitary(key, n, shape=()):
+    '''
+    Sample uniformly from the unitary group
+    key:  a PRNG key used as the random key.
+    n: an integer indicating the resulting dimension.
+    shape: optional, the batch dimensions of the result.
+    '''
     a, b = jax.random.normal(key, (2, *shape, n, n))
     z = a + b * 1j
     q, r = jnp.linalg.qr(z)
@@ -65,47 +70,21 @@ def unitary(key, n, shape):
     return jax.lax.mul(q, jax.lax.expand_dims(jax.lax.div(d, abs(d).astype(d.dtype)), [-2]))
 
 
-def HaarSampleGeneration(Ndata, seed):
+def HaarSampleGeneration(Ndata, dim, seed):
     '''
-    generate random haar states,
+    Generate random Haar states,
     used as inputs in the t=T step for backward denoise
     Args:
     Ndata: number of samples in dataset
     '''
     key = jax.random.PRNGKey(seed)
-    states_T = unitary(key, 2, (Ndata, ))[:,:,0]
+    states_T = unitary(key, dim, (Ndata, ))[:, :, 0]
 
     return states_T
 
 
-def backCircuit(input, params, n_tot, L):
-    '''
-    the backward denoise parameteric quantum circuits,
-    designed following the hardware-efficient ansatz
-    output is the state before measurmeents on ancillas
-    Args:
-    input: input quantum state of n_tot qubits
-    params: the parameters of the circuit
-    n_tot: number of qubits in the circuits
-    L: layers of circuit
-    '''
-    c = tc.Circuit(n_tot, inputs=input)
-
-    for l in range(L):
-        for i in range(n_tot):
-            c.rx(i, theta=params[2* n_tot * l + i])
-            c.ry(i, theta=params[2* n_tot* l + n_tot + i])
-
-        for i in range(n_tot // 2):
-            c.cz(2 * i, 2 * i + 1)
-
-        for i in range((n_tot-1) // 2):
-            c.cz(2 * i + 1, 2 * i + 2)
-
-    return c.state()
-
 class QDDPM():
-    def __init__(self, n, na, T, L):
+    def __init__(self, n, na, T, L, seed=42):
         '''
         Args:
         n: number of data qubits
@@ -119,8 +98,37 @@ class QDDPM():
         self.n_tot = n + na
         self.T = T
         self.L = L
-        # embed the circuit to a vectorized pytorch neural network layer
-        self.backCircuit_vmap = K.jit(K.vmap(partial(backCircuit, n_tot=self.n_tot, L=self.L), vectorized_argnums=0))
+        self.key = jax.random.PRNGKey(seed)
+        self.backCircuit_vmap = K.jit(
+            K.vmap(partial(self.backCircuit), vectorized_argnums=0))
+
+    def backCircuit(self, input, params):
+        '''
+        the backward denoise parameteric quantum circuits,
+        designed following the hardware-efficient ansatz
+        output is the state before measurmeents on ancillas
+        Args:
+        input: input quantum state of n_tot qubits
+        params: the parameters of the circuit
+        n_tot: number of qubits in the circuits
+        L: layers of circuit
+        '''
+        L = self.L
+        n_tot = self.n_tot
+        c = tc.Circuit(n_tot, inputs=input)
+
+        for l in range(L):
+            for i in range(n_tot):
+                c.rx(i, theta=params[2 * n_tot * l + i])
+                c.ry(i, theta=params[2 * n_tot * l + n_tot + i])
+
+            for i in range(n_tot // 2):
+                c.cz(2 * i, 2 * i + 1)
+
+            for i in range((n_tot-1) // 2):
+                c.cz(2 * i + 1, 2 * i + 2)
+
+        return c.state()
 
     def set_diffusionSet(self, states_diff):
         self.states_diff = states_diff
@@ -135,15 +143,17 @@ class QDDPM():
         inputs: states to be measured, first na qubit is ancilla
         '''
         n_batch = inputs.shape[0]
-        m_probs = jnp.abs(jnp.reshape(inputs, [n_batch, 2 ** self.na, 2 ** self.n])) ** 2.0
+        m_probs = jnp.abs(jnp.reshape(
+            inputs, [n_batch, 2 ** self.na, 2 ** self.n])) ** 2.0
         m_probs = jnp.log(jnp.sum(m_probs, axis=2))
-        m_res = jax.random.categorical(jax.random.PRNGKey(42), m_probs)
-        indices = 2 ** self.n * jnp.reshape(m_res, [-1, 1]) + jnp.arange(2 ** self.n)
+        m_res = jax.random.categorical(self.key, m_probs)
+        indices = 2 ** self.n * \
+            jnp.reshape(m_res, [-1, 1]) + jnp.arange(2 ** self.n)
         post_state = jnp.take_along_axis(inputs, indices, axis=1)
         post_state /= jnp.linalg.norm(post_state, axis=1)[:, jnp.newaxis]
-        
+
         return post_state
-        
+
     @partial(jax.jit, static_argnums=(0, ))
     def backwardOutput_t(self, inputs, params):
         '''
@@ -158,34 +168,34 @@ class QDDPM():
         output_t = self.randomMeasure(output_full)
 
         return output_t
-    
+
     def prepareInput_t(self, inputs_T, params_tot, t, Ndata):
         '''
-        prepare the input samples for step t
+        Prepare the input samples for step t
         Args:
         inputs_T: the input state at the beginning of backward
         params_tot: all circuit parameters till step t+1
         '''
-        zero_tensor = jnp.zeros(shape=(Ndata, 2**self.n_tot-2**self.n), dtype=jnp.complex64)
-        input_tplus1 = jnp.concatenate([inputs_T, zero_tensor], axis=1)
-        params_tot = tf.constant(params_tot, dtype=tf.float32)
-        for tt in range(self.T-1, t, -1):
-            output = self.backwardOutput_t(input_tplus1, params_tot[tt])
-            input_tplus1 = jnp.concatenate([output, zero_tensor], axis=1)
+        zero_shape = 2 ** self.n_tot - 2 ** self.n
+        zero_tensor = jnp.zeros(shape=(Ndata, zero_shape), dtype=jnp.complex64)
+        input_t_plus_1 = jnp.concatenate([inputs_T, zero_tensor], axis=1)
+        for tt in range(self.T - 1, t, -1):
+            output = self.backwardOutput_t(input_t_plus_1, params_tot[tt])
+            input_t_plus_1 = jnp.concatenate([output, zero_tensor], axis=1)
 
-        return input_tplus1
-    
+        return input_t_plus_1
+
     def backDataGeneration(self, inputs_T, params_tot, Ndata):
         '''
         generate the dataset in backward denoise process with training data set
         '''
         states = [inputs_T]
-        input_tplus1 = jnp.concatenate([inputs_T, tf.zeros(shape=(Ndata, 2**self.n_tot-2**self.n), 
-                                                           dtype=jnp.complex64)], axis=1)
-        params_tot = tf.cast(tf.convert_to_tensor(params_tot), dtype=tf.float32)
+        zero_shape = 2 ** self.n_tot - 2 ** self.n
+        zero_tensor = jnp.zeros(shape=(Ndata, zero_shape), dtype=jnp.complex64)
+        input_tplus1 = jnp.concatenate([inputs_T, zero_tensor], axis=1)
         for tt in range(self.T-1, -1, -1):
             output = self.backwardOutput_t(input_tplus1, params_tot[tt])
-            input_tplus1 = jnp.concatenate([output, jnp.zeros(shape=(Ndata, 2**self.n_tot-2**self.n), 
+            input_tplus1 = jnp.concatenate([output, jnp.zeros(shape=(Ndata, 2**self.n_tot-2**self.n),
                                                               dtype=jnp.complex64)], axis=1)
             states.append(output)
         states = jnp.stack(states)[::-1]
