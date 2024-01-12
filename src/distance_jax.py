@@ -4,10 +4,10 @@ from ott.geometry import pointcloud
 from ott.solvers.linear import solve
 from ott.geometry.costs import CostFn
 
-import ot
-
 from opt_einsum import contract
 from functools import partial
+
+# from .emd2_jax import emd2_jax
 
 @jax.jit
 def naturalDistance(Set1, Set2):
@@ -25,17 +25,17 @@ def naturalDistance(Set1, Set2):
     return 2. * r12 - r11 - r22
 
 
-def WassDistance(Set1, Set2):
-    '''
-    Calculate the Wasserstein distance between two sets of quantum states
-    the cost matrix is the inter trace distance between sets S1, S2
-    '''
-    D = 1. - jnp.abs(contract('mi,ni->mn', jnp.conj(Set1), Set2, backend='jax')) ** 2.
-    u0 = jnp.ones((D.shape[0],)) / D.shape[0]
-    u1 = jnp.ones((D.shape[1],)) / D.shape[1]
-    Wass_dis = ot.emd2(u0, u1, M=D)
+# def wassDistance(Set1, Set2):
+#     '''
+#     Calculate the Wasserstein distance between two sets of quantum states
+#     the cost matrix is the inter trace distance between sets S1, S2
+#     '''
+#     D = 1. - jnp.abs(contract('mi,ni->mn', jnp.conj(Set1), Set2, backend='jax')) ** 2.
+#     u0 = jnp.ones((D.shape[0],)) / D.shape[0]
+#     u1 = jnp.ones((D.shape[1],)) / D.shape[1]
+#     Wass_dis = emd2_jax(u0, u1, M=D)
 
-    return Wass_dis
+#     return Wass_dis
 
 
 @jax.tree_util.register_pytree_node_class
@@ -45,7 +45,7 @@ class Trace(CostFn):
 
 
 @partial(jax.jit, static_argnums=(2, 3, 4, ))
-def sinkhornDistance(Set1, Set2, reg=0.01, threshold=0.001, lse_mode=True):
+def sinkhornDistance(Set1, Set2, reg=0.05, threshold=1e-3):
     '''
     Calculate the Sinkhorn distance between two sets of quantum states
     the cost matrix is the inter trace distance between sets S1, S2
@@ -54,6 +54,6 @@ def sinkhornDistance(Set1, Set2, reg=0.01, threshold=0.001, lse_mode=True):
     lse_mode: whether to use the log-sum-exp mode
     '''
     geom = pointcloud.PointCloud(Set1, Set2, cost_fn=Trace(), epsilon=reg)
-    ot = solve(geom, a=None, b=None, lse_mode=lse_mode, threshold=threshold)
+    ot = solve(geom, a=None, b=None, lse_mode=True, threshold=threshold)
     
     return ot.reg_ot_cost

@@ -1,9 +1,12 @@
 import jax
 from jax import numpy as jnp
+from jax import config
 
 import tensorcircuit as tc
 
 from functools import partial
+
+config.update("jax_enable_x64", True)
 
 K = tc.set_backend("jax")
 tc.set_dtype('complex64')
@@ -192,11 +195,11 @@ class QDDPM():
         states = [inputs_T]
         zero_shape = 2 ** self.n_tot - 2 ** self.n
         zero_tensor = jnp.zeros(shape=(Ndata, zero_shape), dtype=jnp.complex64)
-        input_tplus1 = jnp.concatenate([inputs_T, zero_tensor], axis=1)
+        input_t_plus_1 = jnp.concatenate([inputs_T, zero_tensor], axis=1)
         for tt in range(self.T-1, -1, -1):
-            output = self.backwardOutput_t(input_tplus1, params_tot[tt])
-            input_tplus1 = jnp.concatenate([output, jnp.zeros(shape=(Ndata, 2**self.n_tot-2**self.n),
-                                                              dtype=jnp.complex64)], axis=1)
+            output = self.backwardOutput_t(input_t_plus_1, params_tot[tt])
+            input_t_plus_1 = jnp.concatenate([output, jnp.zeros(shape=(Ndata, 2**self.n_tot-2**self.n),
+                                                                dtype=jnp.complex64)], axis=1)
             states.append(output)
         states = jnp.stack(states)[::-1]
 
