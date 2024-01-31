@@ -1,3 +1,5 @@
+import datetime
+
 import jax
 from jax import numpy as jnp
 from jax import config
@@ -87,7 +89,7 @@ def HaarSampleGeneration(Ndata, dim, seed):
 
 
 class QDDPM():
-    def __init__(self, n, na, T, L, seed=42):
+    def __init__(self, n, na, T, L):
         '''
         Args:
         n: number of data qubits
@@ -101,7 +103,7 @@ class QDDPM():
         self.n_tot = n + na
         self.T = T
         self.L = L
-        self.key = jax.random.PRNGKey(seed)
+
         self.backCircuit_vmap = K.jit(
             K.vmap(partial(self.backCircuit), vectorized_argnums=0))
 
@@ -137,19 +139,20 @@ class QDDPM():
         self.states_diff = states_diff
 
     @partial(jax.jit, static_argnums=(0, ))
-    def randomMeasure(self, inputs):
+    def randomMeasure(self, inputs, key):
         '''
         Given the inputs on both data & ancilla qubits before measurmenets,
         calculate the post-measurement state.
         The measurement and state output are calculated in parallel for data samples
         Args:
         inputs: states to be measured, first na qubit is ancilla
+        key: key for JAX's pseudo-random number generator
         '''
         n_batch = inputs.shape[0]
         m_probs = jnp.abs(jnp.reshape(
             inputs, [n_batch, 2 ** self.na, 2 ** self.n])) ** 2.0
         m_probs = jnp.log(jnp.sum(m_probs, axis=2))
-        m_res = jax.random.categorical(self.key, m_probs)
+        m_res = jax.random.categorical(key, m_probs)
         indices = 2 ** self.n * \
             jnp.reshape(m_res, [-1, 1]) + jnp.arange(2 ** self.n)
         post_state = jnp.take_along_axis(inputs, indices, axis=1)
@@ -158,17 +161,18 @@ class QDDPM():
         return post_state
 
     @partial(jax.jit, static_argnums=(0, ))
-    def backwardOutput_t(self, inputs, params):
+    def backwardOutput_t(self, inputs, params, key):
         '''
         Backward denoise process at step t
         Args:
         inputs: the input data set at step t
+        key: key for JAX's pseudo-random number generator
         '''
         # outputs through quantum circuits before measurement
         output_full = self.backCircuit_vmap(inputs, params)
 
         # perform measurement
-        output_t = self.randomMeasure(output_full)
+        output_t = self.randomMeasure(output_full, key)
 
         return output_t
 
@@ -179,11 +183,16 @@ class QDDPM():
         inputs_T: the input state at the beginning of backward
         params_tot: all circuit parameters till step t+1
         '''
+        # create a key for PRNG
+        seed = int(1e6 * datetime.datetime.now().timestamp())
+        key = jax.random.PRNGKey(seed)
+
         zero_shape = 2 ** self.n_tot - 2 ** self.n
         zero_tensor = jnp.zeros(shape=(Ndata, zero_shape), dtype=jnp.complex64)
         input_t_plus_1 = jnp.concatenate([inputs_T, zero_tensor], axis=1)
         for tt in range(self.T - 1, t, -1):
-            output = self.backwardOutput_t(input_t_plus_1, params_tot[tt])
+            key, subkey = jax.random.split(key)
+            output = self.backwardOutput_t(input_t_plus_1, params_tot[tt], subkey)
             input_t_plus_1 = jnp.concatenate([output, zero_tensor], axis=1)
 
         return input_t_plus_1
@@ -192,15 +201,20 @@ class QDDPM():
         '''
         generate the dataset in backward denoise process with training data set
         '''
+        # create a key for PRNG
+        seed = int(1e6 * datetime.datetime.now().timestamp())
+        key = jax.random.PRNGKey(seed)
+
         states = [inputs_T]
         zero_shape = 2 ** self.n_tot - 2 ** self.n
         zero_tensor = jnp.zeros(shape=(Ndata, zero_shape), dtype=jnp.complex64)
         input_t_plus_1 = jnp.concatenate([inputs_T, zero_tensor], axis=1)
         for tt in range(self.T-1, -1, -1):
-            output = self.backwardOutput_t(input_t_plus_1, params_tot[tt])
-            input_t_plus_1 = jnp.concatenate([output, jnp.zeros(shape=(Ndata, 2**self.n_tot-2**self.n),
-                                                                dtype=jnp.complex64)], axis=1)
+            key, subkey = jax.random.split(key)
+            output = self.backwardOutput_t(
+                input_t_plus_1, params_tot[tt], subkey)
+            input_t_plus_1 = jnp.concatenate([output, zero_tensor], axis=1)
             states.append(output)
-        states = jnp.stack(states)[::-1]
+        states = jnp.stack(states[::-1])
 
         return states
