@@ -20,4 +20,4 @@ The simulation of quantum circuit is performed via the [TensorCircuit](https://t
 Additionally, the packages [POT](https://pythonot.github.io/) and [OTT](https://ott-jax.readthedocs.io/en/latest/) are required for the computation of Wasserstein distance, [`opt_einsum`](https://optimized-einsum.readthedocs.io/en/stable/) is used for speeding up certain evaluation, and [Optax](https://github.com/google-deepmind/optax) is needed for optmization with JAX backend.
 
 ## File Structure
-Presented in this repository are notebooks.
+Notebooks in this repository can be used to reproduce the experiment presented in the paper.
