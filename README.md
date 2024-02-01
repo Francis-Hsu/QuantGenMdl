@@ -21,12 +21,12 @@ Additionally, the packages [POT](https://pythonot.github.io/) and [OTT](https://
 
 ## File Structure
 Notebooks in this repository can be used to reproduce the experiment presented in the paper. Their file names are self-explanatory:
-| Notebook      | Generation Task   | Backend     |
-| :---          | :----             | :---        |
-| QDDPM_circle  | Circular States   | TensorFlow  |
-| QDDPM_cluster | Clustered State   | PyTorch     |
-| QDDPM_noise   | Correlated Noise  | TensorFlow  |
-| QDDPM_phase   | Many-body Phase   | JAX         |
+| Notebook        | Generation Task   | Backend     |
+| :---            | :----             | :---        |
+| `QDDPM_circle`  | Circular States   | TensorFlow  |
+| `QDDPM_cluster` | Clustered State   | PyTorch     |
+| `QDDPM_noise`   | Correlated Noise  | TensorFlow  |
+| `QDDPM_phase`   | Many-body Phase   | JAX         |
 
 In addition to these, the two files `QDT_training.ipynb` and `QGAN_training.ipynb` show the training process of our benchmark models (Quantum Direct Transport and Quantum GAN, respectfully), and both utilize the JAX backend.
 
