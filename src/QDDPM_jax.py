@@ -59,6 +59,28 @@ def setDiffusionDataOneQubit(inputs, diff_hs):
 
     return states
 
+def setDiffusionDataMultiQubit(inputs, diff_hs, n):
+    '''
+    Obtain the quantum data set for multi qubit through diffusion step t
+    Args:
+    t: diffusion step
+    inputs: the input quantum data set
+    diff_hs: the hyper-parameter to control the amplitude of quantum circuit angles
+    n: number of qubits
+    '''
+    t = diff_hs.shape[0]
+    Ndata = inputs.shape[0]
+    
+    key = jax.random.PRNGKey(t)
+    phis = jax.random.uniform(key, shape=(Ndata, 3 * n * t), minval=-jnp.pi/8., maxval=jnp.pi/8.)
+    phis *= jnp.repeat(diff_hs, 3*n)
+
+    gs = jax.random.uniform(key, shape=(Ndata, t), minval=0.4, maxval=0.6)
+    gs *= diff_hs 
+
+    states = K.vmap(partial(scrambleCircuitMultiQubit, n=n), vectorized_argnums=(0, 1, 2))(inputs, phis, gs)
+
+    return states
 
 def unitary(key, n, shape=()):
     '''
