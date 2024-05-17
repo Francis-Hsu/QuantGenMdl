@@ -35,6 +35,29 @@ def scrambleCircuitOneQubit(input, phis):
 
     return c.state()
 
+def scrambleCircuitMultiQubit(input, phis, gs, n):
+    '''
+    obtain the state through diffusion step t
+    Args:
+    t: diffusion step
+    input: the input quantum state
+    phis: the single-qubit rotation angles in diffusion circuit
+    gs: the angle of RZZ gates in diffusion circuit when n>=2
+    '''
+    t = phis.shape[0] // (3*n)
+    c = tc.Circuit(n, inputs=input)
+
+    for s in range(t):
+        for i in range(n):
+            c.rz(i, theta=phis[3*n*s + i])
+            c.ry(i, theta=phis[3*n*s + n + i])
+            c.rz(i, theta=phis[3*n*s + 2*n + i])
+        
+        for i, j in combinations(range(n), 2):
+            c.rzz(i, j, theta=gs[s] / (2 * n ** 0.5))
+    
+    return c.state()
+
 
 def setDiffusionDataOneQubit(inputs, diff_hs):
     '''
