@@ -7,6 +7,7 @@ from jax import config
 import tensorcircuit as tc
 
 from functools import partial
+from itertools import combinations
 
 config.update("jax_enable_x64", True)
 
